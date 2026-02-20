@@ -1,0 +1,34 @@
+{
+  "id": "betterclaw",
+  "name": "BetterClaw Context",
+  "description": "Intelligent context layer for BetterClaw iOS companion app",
+  "version": "1.0.0",
+  "skills": ["./skills/betterclaw"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "llmModel": {
+        "type": "string",
+        "default": "openai/gpt-4o-mini"
+      },
+      "pushBudgetPerDay": {
+        "type": "number",
+        "default": 10
+      },
+      "patternWindowDays": {
+        "type": "number",
+        "default": 14
+      },
+      "proactiveEnabled": {
+        "type": "boolean",
+        "default": true
+      }
+    }
+  },
+  "uiHints": {
+    "llmModel": { "label": "Triage LLM Model", "placeholder": "openai/gpt-4o-mini" },
+    "pushBudgetPerDay": { "label": "Max pushes per day" },
+    "proactiveEnabled": { "label": "Enable proactive insights" }
+  }
+}

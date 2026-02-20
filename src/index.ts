@@ -1,0 +1,177 @@
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { PluginConfig } from "./types.js";
+import { ContextManager } from "./context.js";
+import { createGetContextTool } from "./tools/get-context.js";
+import { EventLog } from "./events.js";
+import { RulesEngine } from "./filter.js";
+import { JudgmentLayer } from "./judgment.js";
+import { PatternEngine } from "./patterns.js";
+import { ProactiveEngine } from "./triggers.js";
+import { processEvent } from "./pipeline.js";
+import type { PipelineDeps } from "./pipeline.js";
+
+export type { PluginConfig } from "./types.js";
+
+const DEFAULT_CONFIG: PluginConfig = {
+  llmModel: "openai/gpt-4o-mini",
+  pushBudgetPerDay: 10,
+  patternWindowDays: 14,
+  proactiveEnabled: true,
+};
+
+function resolveConfig(raw: Record<string, unknown> | undefined): PluginConfig {
+  return {
+    llmModel:
+      typeof raw?.llmModel === "string" && raw.llmModel.trim()
+        ? raw.llmModel.trim()
+        : DEFAULT_CONFIG.llmModel,
+    pushBudgetPerDay:
+      typeof raw?.pushBudgetPerDay === "number" && raw.pushBudgetPerDay > 0
+        ? raw.pushBudgetPerDay
+        : DEFAULT_CONFIG.pushBudgetPerDay,
+    patternWindowDays:
+      typeof raw?.patternWindowDays === "number" && raw.patternWindowDays > 0
+        ? raw.patternWindowDays
+        : DEFAULT_CONFIG.patternWindowDays,
+    proactiveEnabled:
+      typeof raw?.proactiveEnabled === "boolean"
+        ? raw.proactiveEnabled
+        : DEFAULT_CONFIG.proactiveEnabled,
+  };
+}
+
+export default {
+  id: "betterclaw",
+  name: "BetterClaw Context",
+
+  register(api: OpenClawPluginApi) {
+    const config = resolveConfig(api.pluginConfig as Record<string, unknown> | undefined);
+    const stateDir = api.runtime.state.resolveStateDir();
+
+    api.logger.info(`betterclaw plugin loaded (model=${config.llmModel}, budget=${config.pushBudgetPerDay})`);
+
+    // Context manager (load synchronously — file read deferred to first access)
+    const ctxManager = new ContextManager(stateDir);
+
+    // Event log, rules engine, judgment layer
+    const eventLog = new EventLog(stateDir);
+    const rules = new RulesEngine(config.pushBudgetPerDay);
+    const judgment = new JudgmentLayer(api, config);
+
+    // Pipeline dependencies
+    const pipelineDeps: PipelineDeps = {
+      api,
+      config,
+      context: ctxManager,
+      events: eventLog,
+      rules,
+      judgment,
+    };
+
+    // Track whether async init has completed
+    let initialized = false;
+    const initPromise = (async () => {
+      try {
+        await ctxManager.load();
+        const recentEvents = await eventLog.readSince(Date.now() / 1000 - 86400);
+        rules.restoreCooldowns(
+          recentEvents
+            .filter((e) => e.decision === "push")
+            .map((e) => ({ subscriptionId: e.event.subscriptionId, firedAt: e.event.firedAt })),
+        );
+        initialized = true;
+        api.logger.info("betterclaw: async init complete");
+      } catch (err) {
+        api.logger.error(`betterclaw: init failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    })();
+
+    // Ping health check
+    api.registerGatewayMethod("betterclaw.ping", ({ respond }) => {
+      respond(true, { ok: true, version: "1.0.0", initialized });
+    });
+
+    // Agent tool
+    api.registerTool(createGetContextTool(ctxManager), { optional: true });
+
+    // Auto-reply command
+    api.registerCommand({
+      name: "bc",
+      description: "Show current BetterClaw device context snapshot",
+      handler: () => {
+        const state = ctxManager.get();
+        const battery = state.device.battery;
+        const loc = state.device.location;
+        const health = state.device.health;
+        const activity = state.activity;
+
+        const lines: string[] = [];
+        if (battery) {
+          lines.push(`Battery: ${Math.round(battery.level * 100)}% (${battery.state})`);
+        }
+        if (loc) {
+          lines.push(`Location: ${loc.label ?? `${loc.latitude.toFixed(4)}, ${loc.longitude.toFixed(4)}`}`);
+        }
+        if (activity.currentZone) {
+          const since = activity.zoneEnteredAt
+            ? ` since ${new Date(activity.zoneEnteredAt * 1000).toLocaleTimeString()}`
+            : "";
+          lines.push(`Zone: ${activity.currentZone}${since}`);
+        }
+        if (health?.stepsToday) {
+          lines.push(`Steps: ${Math.round(health.stepsToday).toLocaleString()}`);
+        }
+        lines.push(`Events today: ${state.meta.eventsToday} | Pushes: ${state.meta.pushesToday}`);
+
+        return { text: lines.join("\n") };
+      },
+    });
+
+    // Event intake RPC
+    api.registerGatewayMethod("betterclaw.event", async ({ params, respond }) => {
+      try {
+        // Wait for init if still pending
+        if (!initialized) await initPromise;
+
+        const event = {
+          subscriptionId: typeof params?.subscriptionId === "string" ? params.subscriptionId : "",
+          source: typeof params?.source === "string" ? params.source : "",
+          data: (params?.data && typeof params.data === "object" ? params.data : {}) as Record<string, number>,
+          metadata: (params?.metadata && typeof params.metadata === "object"
+            ? params.metadata
+            : undefined) as Record<string, string> | undefined,
+          firedAt: typeof params?.firedAt === "number" ? params.firedAt : Date.now() / 1000,
+        };
+
+        if (!event.subscriptionId || !event.source) {
+          respond(false, undefined, { code: "INVALID_PARAMS", message: "subscriptionId and source required" });
+          return;
+        }
+
+        respond(true, { accepted: true });
+        await processEvent(pipelineDeps, event);
+      } catch (err) {
+        api.logger.error(`betterclaw.event handler error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
+
+    // Pattern engine + proactive engine
+    const patternEngine = new PatternEngine(ctxManager, eventLog, config.patternWindowDays);
+    const proactiveEngine = new ProactiveEngine(ctxManager, api, config);
+
+    // Background service
+    api.registerService({
+      id: "betterclaw-engine",
+      start: () => {
+        patternEngine.startSchedule();
+        proactiveEngine.startSchedule();
+        api.logger.info("betterclaw: background services started");
+      },
+      stop: () => {
+        patternEngine.stopSchedule();
+        proactiveEngine.stopSchedule();
+        api.logger.info("betterclaw: background services stopped");
+      },
+    });
+  },
+};
