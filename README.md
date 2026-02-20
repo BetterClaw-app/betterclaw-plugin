@@ -1,6 +1,8 @@
 # @betterclaw-app/betterclaw
 
-OpenClaw plugin that adds intelligent event filtering, context tracking, pattern recognition, and proactive triggers for the [BetterClaw](https://github.com/BetterClaw-app) iOS companion app.
+An [OpenClaw](https://openclaw.dev) plugin that acts as an intelligent context layer between the [BetterClaw](https://github.com/BetterClaw-app) iOS app and your AI agent.
+
+Instead of flooding your agent with every sensor reading, the plugin filters, triages, and enriches device events — only forwarding what actually matters.
 
 ## Install
 
@@ -8,42 +10,69 @@ OpenClaw plugin that adds intelligent event filtering, context tracking, pattern
 openclaw plugins install @betterclaw-app/betterclaw
 ```
 
-## What it does
+## How it works
 
-The plugin sits between the BetterClaw iOS app and the OpenClaw AI agent. Instead of dumping every device event into the agent's conversation, it:
+```
+iOS App  ──events──▶  Plugin Pipeline  ──filtered──▶  Agent Session
+                          │
+                     ┌────┴─────┐
+                     │ Filter   │  dedup, cooldowns, daily budget
+                     │ Triage   │  LLM call for ambiguous events
+                     │ Context  │  battery, location, health, zones
+                     │ Patterns │  routines, trends, stats (every 6h)
+                     │ Proactive│  combined-signal insights
+                     └──────────┘
+```
 
-- **Filters** events with a rules engine (dedup, cooldowns, budget limits)
-- **Triages** ambiguous events with a cheap LLM call (configurable model)
-- **Tracks context** — battery, location zones, health metrics, activity state
-- **Computes patterns** — location routines, health trends, event stats (every 6h)
-- **Fires proactive insights** — low battery away from home, unusual inactivity, sleep deficit, routine deviations, weekly health digest
+**Filter** — Rules engine with per-source dedup, cooldown windows, and a configurable daily push budget. Prevents event spam.
 
-Events that pass the filter are injected into the agent's main session. The agent decides whether to notify the user.
+**Triage** — Ambiguous events get a cheap LLM call (configurable model) to decide push/suppress/defer. Keeps the expensive agent focused.
+
+**Context** — Maintains a rolling device state snapshot: battery level/state, GPS coordinates, zone occupancy, health metrics, activity classification.
+
+**Patterns** — Every 6 hours, computes location routines, health trends (7-day and 30-day baselines for steps, sleep, heart rate), and event frequency stats.
+
+**Proactive** — Fires combined-signal insights when conditions align: low battery away from home, unusual inactivity, sleep deficit, routine deviations, weekly health digest.
 
 ## Configuration
 
-Set via `openclaw.json` under `plugins.entries.betterclaw.config`:
+Add to your `openclaw.json`:
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `llmModel` | `openai/gpt-4o-mini` | Model for ambiguous event triage |
-| `pushBudgetPerDay` | `10` | Max events pushed to agent per day |
-| `patternWindowDays` | `14` | Days of history for pattern computation |
-| `proactiveEnabled` | `true` | Enable proactive insight triggers |
+```jsonc
+{
+  "plugins": {
+    "entries": {
+      "betterclaw": {
+        "enabled": true,
+        "config": {
+          "llmModel": "openai/gpt-4o-mini",  // model for event triage
+          "pushBudgetPerDay": 10,             // max events forwarded to agent per day
+          "patternWindowDays": 14,            // days of history for pattern computation
+          "proactiveEnabled": true            // enable proactive insight triggers
+        }
+      }
+    }
+  }
+}
+```
+
+All config keys are optional — defaults are shown above.
 
 ## Agent tool
 
-The plugin registers a `get_context` tool the agent can call to read the current device state (battery, location, health, activity, patterns).
+The plugin registers a `get_context` tool the agent can call anytime to read the full device state snapshot, including derived patterns and activity classification.
 
 ## Commands
 
-- `/bc` — Show current device context snapshot in chat
+| Command | Description |
+|---------|-------------|
+| `/bc` | Show current device context snapshot in chat |
 
 ## Compatibility
 
-| Plugin | iOS App | OpenClaw |
-|--------|---------|----------|
-| 1.x | 1.x+ | 2025.12+ |
+| Plugin | BetterClaw iOS | OpenClaw |
+|--------|----------------|----------|
+| 1.x    | 1.x+           | 2025.12+ |
 
 ## License
 
