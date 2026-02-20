@@ -2,7 +2,7 @@
   "id": "betterclaw",
   "name": "BetterClaw Context",
   "description": "Intelligent context layer for BetterClaw iOS companion app",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "skills": ["./skills/betterclaw"],
   "configSchema": {
     "type": "object",
